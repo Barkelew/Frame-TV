@@ -2,6 +2,7 @@
 Description=Samsung Frame TV Slideshow
 After=network-online.target
 Wants=network-online.target
+RequiresMountsFor=/media/adam/DRPHOTOUSB/Gallery
 
 [Service]
 Type=oneshot
