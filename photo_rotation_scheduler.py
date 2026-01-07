@@ -11,21 +11,41 @@ import logging
 import heapq
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageTk
     EXIF_AVAILABLE = True
+    PIL_AVAILABLE = True
 except ImportError:
     EXIF_AVAILABLE = False
+    PIL_AVAILABLE = False
 
 PHOTO_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff')
 LOG_FILE = "viewed_photos.json"
-CACHE_FILE = "photo_dates.json"
+CACHE_FILE = "photo_metadata.json"
+
+# GUI Configuration
+BG_COLOR = "#c1b1f2"
+
+class TextHandler(logging.Handler):
+    """Custom logging handler that writes to a tkinter Text widget"""
+    def __init__(self, text_widget):
+        super().__init__()
+        self.text_widget = text_widget
+        
+    def emit(self, record):
+        msg = self.format(record)
+        def append():
+            self.text_widget.configure(state='normal')
+            self.text_widget.insert(tk.END, msg + '\n')
+            self.text_widget.configure(state='disabled')
+            self.text_widget.see(tk.END)
+        self.text_widget.after(0, append)
 
 class PhotoScheduler:
     def __init__(self):
         self.setup_logging()
         self.setup_gui()
         self.viewed_photos = self.load_viewed_photos()
-        self.date_cache = self.load_date_cache()
+        self.metadata_cache = self.load_metadata_cache()
         self.cache_dirty = False
         self.viewed_photos_lock = threading.Lock()
         self.operation_lock = threading.Lock()
@@ -45,41 +65,54 @@ class PhotoScheduler:
         
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s',
                           handlers=[logging.StreamHandler()])
-        formatter = NoMillisecondsFormatter(fmt='%(asctime)s - %(message)s')
+        self.formatter = NoMillisecondsFormatter(fmt='%(asctime)s - %(message)s')
         for handler in logging.getLogger().handlers:
-            handler.setFormatter(formatter)
+            handler.setFormatter(self.formatter)
         self.logger = logging.getLogger(__name__)
     
-    def load_date_cache(self):
+    def load_metadata_cache(self):
         try:
             if Path(CACHE_FILE).exists():
                 with open(CACHE_FILE, 'r') as f:
-                    return json.load(f)
+                    cache = json.load(f)
+                    # Handle backward compatibility with old format
+                    if cache and isinstance(next(iter(cache.values()), None), (int, float)):
+                        # Old format: {"photo.jpg": timestamp}
+                        self.logger.info("Converting old cache format to new format")
+                        cache = {k: {"date": v, "orientation": None} for k, v in cache.items()}
+                        self.cache_dirty = True
+                    return cache
         except Exception as e:
-            self.logger.error(f"Error loading date cache: {e}")
+            self.logger.error(f"Error loading metadata cache: {e}")
         return {}
     
-    def save_date_cache(self):
+    def save_metadata_cache(self):
         if not self.cache_dirty:
             return
         try:
             with open(CACHE_FILE, 'w') as f:
-                json.dump(self.date_cache, f)
+                json.dump(self.metadata_cache, f)
             self.cache_dirty = False
         except Exception as e:
-            self.logger.error(f"Error saving date cache: {e}")
+            self.logger.error(f"Error saving metadata cache: {e}")
         
     def get_photo_date(self, photo_path):
         """Get photo date with caching"""
         filename = photo_path.name
         
         # Check cache first
-        if filename in self.date_cache:
-            return self.date_cache[filename]
+        if filename in self.metadata_cache:
+            cached_date = self.metadata_cache[filename].get("date")
+            if cached_date is not None:
+                return cached_date
         
         # Calculate date using fallback hierarchy
         date = self._calculate_photo_date(photo_path)
-        self.date_cache[filename] = date
+        
+        # Update cache
+        if filename not in self.metadata_cache:
+            self.metadata_cache[filename] = {}
+        self.metadata_cache[filename]["date"] = date
         self.cache_dirty = True
         return date
     
@@ -107,11 +140,54 @@ class PhotoScheduler:
             self.logger.warning(f"Error getting date for {photo_path}: {e}")
             return time.time()
     
+    def get_photo_orientation(self, photo_path):
+        """Get photo orientation (portrait or landscape) with caching"""
+        filename = photo_path.name
+        
+        # Check cache first
+        if filename in self.metadata_cache:
+            cached_orientation = self.metadata_cache[filename].get("orientation")
+            if cached_orientation is not None:
+                return cached_orientation
+        
+        # Calculate orientation
+        orientation = self._calculate_photo_orientation(photo_path)
+        
+        # Update cache
+        if filename not in self.metadata_cache:
+            self.metadata_cache[filename] = {}
+        self.metadata_cache[filename]["orientation"] = orientation
+        self.cache_dirty = True
+        return orientation
+    
+    def _calculate_photo_orientation(self, photo_path):
+        """Calculate photo orientation from dimensions"""
+        try:
+            if EXIF_AVAILABLE:
+                with Image.open(photo_path) as img:
+                    width, height = img.size
+                    # Square counts as portrait
+                    return "landscape" if width > height else "portrait"
+            else:
+                # If PIL not available, default to both (no filtering)
+                return None
+        except Exception as e:
+            self.logger.warning(f"Error getting orientation for {photo_path}: {e}")
+            return None
+    
     def setup_gui(self):
         self.root = tk.Tk()
         self.root.title("Photo Rotation Scheduler")
-        self.root.geometry("600x350")
+        self.root.configure(bg=BG_COLOR)
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # Configure ttk style for the background color
+        self.style = ttk.Style()
+        self.style.configure("TFrame", background=BG_COLOR)
+        self.style.configure("TLabel", background=BG_COLOR)
+        self.style.configure("TLabelframe", background=BG_COLOR)
+        self.style.configure("TLabelframe.Label", background=BG_COLOR)
+        self.style.configure("Large.TButton", padding=(20, 10), font=('TkDefaultFont', 10, 'bold'))
         
         default_library = Path("/media/adam/DRPHOTOUSB")
         self.library_path = tk.StringVar(value=str(default_library))
@@ -121,6 +197,7 @@ class PhotoScheduler:
         self.switches_per_day = tk.StringVar(value="1")
         self.main_time = tk.StringVar(value="21:15")
         self.selection_mode = tk.StringVar(value="Random")
+        self.orientation_filter = tk.StringVar(value="Landscape")
         self.status = tk.StringVar(value="Ready")
         self.next_switch = tk.StringVar(value="Calculating...")
         
@@ -128,30 +205,47 @@ class PhotoScheduler:
         self.create_ui()
         
     def create_ui(self):
-        settings = ttk.LabelFrame(self.root, text="Settings", padding=10)
-        settings.pack(fill="x", padx=10, pady=5)
+        # Top section: Folder Settings with logo on the right
+        top_frame = tk.Frame(self.root, bg=BG_COLOR)
+        top_frame.pack(fill="x", padx=(10, 25), pady=(15, 5))
         
-        self.create_path_row(settings, "Library:", self.library_path, 0)
+        # Folder Settings frame (left side)
+        folder_settings = ttk.LabelFrame(top_frame, text="Folder Settings", padding=10)
+        folder_settings.pack(side="left", fill="x", expand=False)
         
-        ttk.Label(settings, text="Gallery:").grid(row=1, column=0, sticky="w", pady=2)
-        ttk.Entry(settings, textvariable=self.gallery_path_display, width=45, state="readonly").grid(row=1, column=1, sticky="w", padx=5)
+        self.create_path_row(folder_settings, "Library:", self.library_path, 0)
+        
+        ttk.Label(folder_settings, text="Gallery:").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(folder_settings, textvariable=self.gallery_path_display, width=55, state="readonly").grid(row=1, column=1, sticky="w", padx=5, pady=5)
+        
+        # Photo Settings frame
+        settings = ttk.LabelFrame(self.root, text="Photo Settings", padding=10)
+        settings.pack(fill="x", padx=(10, 250), pady=5)
         
         photo_frame = ttk.Frame(settings)
-        photo_frame.grid(row=2, column=0, columnspan=2, pady=5)
+        photo_frame.grid(row=0, column=0, columnspan=2, pady=5)
         ttk.Label(photo_frame, text="Photos:").pack(side="left")
         ttk.Entry(photo_frame, textvariable=self.photo_count, width=8).pack(side="left", padx=5)
         ttk.Label(photo_frame, text="Mode:").pack(side="left", padx=(20,0))
         mode_combo = ttk.Combobox(photo_frame, textvariable=self.selection_mode, width=10, state="readonly")
         mode_combo['values'] = ("Random", "Newest", "Oldest")
         mode_combo.pack(side="left", padx=5)
+        ttk.Label(photo_frame, text="Orientation:").pack(side="left", padx=(10,0))
+        orientation_combo = ttk.Combobox(photo_frame, textvariable=self.orientation_filter, width=10, state="readonly")
+        orientation_combo['values'] = ("Both", "Portrait", "Landscape")
+        orientation_combo.pack(side="left", padx=5)
         
         schedule_frame = ttk.Frame(settings)
-        schedule_frame.grid(row=3, column=0, columnspan=2, pady=5)
+        schedule_frame.grid(row=1, column=0, columnspan=2, pady=5)
         ttk.Label(schedule_frame, text="Main Time:").pack(side="left")
         ttk.Entry(schedule_frame, textvariable=self.main_time, width=8).pack(side="left", padx=5)
         ttk.Label(schedule_frame, text="Switches/Day:").pack(side="left", padx=(20,0))
         ttk.Entry(schedule_frame, textvariable=self.switches_per_day, width=8).pack(side="left", padx=5)
-        ttk.Button(schedule_frame, text="Update Settings", command=self.update_settings).pack(side="left", padx=(20,0))
+        
+        # buttons
+        update_btn = ttk.Button(schedule_frame, text="Update Settings", 
+                               command=self.update_settings, style="Large.TButton")
+        update_btn.pack(side="left", padx=(20,0))
         
         status_frame = ttk.LabelFrame(self.root, text="Status", padding=10)
         status_frame.pack(fill="x", padx=10, pady=5)
@@ -170,11 +264,39 @@ class PhotoScheduler:
         self.reset_btn = ttk.Button(controls, text="Reset View History", command=self.reset_history)
         self.reset_btn.pack(side="left", padx=5)
         
+        # Console frame
+        console_frame = ttk.LabelFrame(self.root, text="Console", padding=5)
+        console_frame.pack(fill="both", expand=True, padx=10, pady=(5, 10))
+        
+        # Console text widget with scrollbar
+        console_scroll = ttk.Scrollbar(console_frame)
+        console_scroll.pack(side="right", fill="y")
+        
+        self.console_text = tk.Text(console_frame, height=10, wrap=tk.WORD,
+                                    yscrollcommand=console_scroll.set,
+                                    bg="#2b2b2b", fg="#ffffff",
+                                    font=("Consolas", 9))
+        self.console_text.pack(fill="both", expand=True)
+        self.console_text.configure(state='disabled')
+        console_scroll.config(command=self.console_text.yview)
+        
+        # Add text handler to logger
+        text_handler = TextHandler(self.console_text)
+        text_handler.setFormatter(self.formatter)
+        logging.getLogger().addHandler(text_handler)
+        
+        # Calculate window height: controls + 400px console
+        self.root.update_idletasks()
+        controls_height = self.root.winfo_reqheight()
+        console_height = 400
+        total_height = controls_height + console_height
+        self.root.geometry(f"750x{total_height}+0+0")
+        
     def create_path_row(self, parent, label, variable, row):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
         frame = ttk.Frame(parent)
         frame.grid(row=row, column=1, sticky="ew", padx=5)
-        ttk.Entry(frame, textvariable=variable, width=40).pack(side="left", fill="x", expand=True)
+        ttk.Entry(frame, textvariable=variable, width=50).pack(side="left", fill="x", expand=True)
         ttk.Button(frame, text="...", width=3, command=lambda: self.browse_path(variable)).pack(side="left", padx=(5,0))
     
     def update_gallery_path(self, *args):
@@ -300,7 +422,7 @@ class PhotoScheduler:
         except Exception as e:
             self.logger.error(f"Error reading directory {directory}: {e}")
     
-    def select_photos(self, library_path, count, mode):
+    def select_photos(self, library_path, count, mode, orientation_filter="Both"):
         count = max(1, min(count, 10000))
         library_path = Path(library_path)
         
@@ -310,6 +432,14 @@ class PhotoScheduler:
                     return
                 with self.viewed_photos_lock:
                     if photo.name not in self.viewed_photos:
+                        # Lazy orientation check
+                        if orientation_filter != "Both":
+                            photo_orientation = self.get_photo_orientation(photo)
+                            if photo_orientation is None:
+                                # Can't determine orientation, include it
+                                yield photo
+                            elif photo_orientation.lower() != orientation_filter.lower():
+                                continue  # Skip this photo
                         yield photo
         
         if mode == "Random":
@@ -319,7 +449,21 @@ class PhotoScheduler:
                 with self.viewed_photos_lock:
                     self.viewed_photos.clear()
                 self.save_viewed_photos()
-                unviewed = list(self.iter_photos(library_path))
+                
+                # Reselect with all photos
+                def all_photos():
+                    for photo in self.iter_photos(library_path):
+                        if self.operation_cancelled.is_set():
+                            return
+                        if orientation_filter != "Both":
+                            photo_orientation = self.get_photo_orientation(photo)
+                            if photo_orientation is None:
+                                yield photo
+                            elif photo_orientation.lower() != orientation_filter.lower():
+                                continue
+                        yield photo
+                
+                unviewed = list(all_photos())
             return random.sample(unviewed, min(count, len(unviewed)))
         
         else:
@@ -333,7 +477,7 @@ class PhotoScheduler:
                     processed[0] += 1
                     if processed[0] % 5000 == 0:
                         self.logger.info(f"Scanned {processed[0]} photos...")
-                        self.save_date_cache()  # Save cache periodically
+                        self.save_metadata_cache()  # Save cache periodically
                     yield (self.get_photo_date(photo), photo)
             
             if mode == "Newest":
@@ -342,7 +486,7 @@ class PhotoScheduler:
                 selected = [photo for _, photo in heapq.nsmallest(count, photo_with_date_gen())]
             
             self.logger.info(f"Scan complete: processed {processed[0]} photos")
-            self.save_date_cache()  # Save cache after scan
+            self.save_metadata_cache()  # Save cache after scan
             
             if len(selected) < count:
                 self.logger.info("Resetting history - not enough unviewed photos")
@@ -355,6 +499,14 @@ class PhotoScheduler:
                     for photo in self.iter_photos(library_path):
                         if self.operation_cancelled.is_set():
                             return
+                        # Apply orientation filter
+                        if orientation_filter != "Both":
+                            photo_orientation = self.get_photo_orientation(photo)
+                            if photo_orientation is None:
+                                pass  # Include photo if orientation can't be determined
+                            elif photo_orientation.lower() != orientation_filter.lower():
+                                continue  # Skip this photo
+                        
                         processed[0] += 1
                         if processed[0] % 5000 == 0:
                             self.logger.info(f"Scanned {processed[0]} photos...")
@@ -366,7 +518,7 @@ class PhotoScheduler:
                     selected = [photo for _, photo in heapq.nsmallest(count, all_photos_with_date())]
                 
                 self.logger.info(f"Scan complete: processed {processed[0]} photos")
-                self.save_date_cache()
+                self.save_metadata_cache()
             
             return selected
     
@@ -404,6 +556,7 @@ class PhotoScheduler:
             self.operation_lock.release()
     
     def _switch_photos_worker(self):
+        result_message = "Operation cancelled"
         try:
             self.logger.info("Starting photo switch...")
             
@@ -415,58 +568,78 @@ class PhotoScheduler:
             
             gallery_path.mkdir(parents=True, exist_ok=True)
             
-            moved_back = 0
-            deleted_dupes = []
-            
-            for photo in self.iter_photos(gallery_path):
-                if self.operation_cancelled.is_set():
-                    return
-                new_path = library_path / photo.name
-                try:
-                    if new_path.exists():
-                        photo.unlink()
-                        deleted_dupes.append(photo.name)
-                    else:
-                        photo.rename(new_path)
-                        moved_back += 1
-                except Exception as e:
-                    self.logger.error(f"Error moving {photo}: {e}")
-            
-            if deleted_dupes:
-                with self.viewed_photos_lock:
-                    for filename in deleted_dupes:
-                        self.viewed_photos.discard(filename)
-                self.save_viewed_photos()
-                self.logger.info(f"Removed {len(deleted_dupes)} duplicate(s)")
-            
-            if moved_back > 0:
-                self.logger.info(f"Moved {moved_back} photos back to library")
-            
+            # STEP 1: Select new photos FIRST (before touching Gallery)
             count = int(self.photo_count.get())
             mode = self.selection_mode.get()
-            selected = self.select_photos(library_path, count, mode)
+            orientation = self.orientation_filter.get()
+            self.logger.info("Selecting new photos...")
+            selected = self.select_photos(library_path, count, mode, orientation)
+            selected_names = {photo.name for photo in selected}
             
+            # STEP 2: Get current Gallery contents
+            current_gallery_photos = list(self.iter_photos(gallery_path))
+            current_gallery_names = {photo.name for photo in current_gallery_photos}
+            
+            # STEP 3: Move NEW photos to Gallery (Gallery now has old + new)
             moved_to_gallery = 0
             for photo in selected:
                 if self.operation_cancelled.is_set():
                     return
                 new_path = gallery_path / photo.name
                 try:
-                    photo.rename(new_path)
+                    if new_path.exists():
+                        # Photo already in Gallery (duplicate in library)
+                        photo.unlink()  # Delete the library duplicate
+                        self.logger.debug(f"Deleted library duplicate: {photo.name}")
+                    else:
+                        photo.rename(new_path)
+                        moved_to_gallery += 1
                     with self.viewed_photos_lock:
                         self.viewed_photos.add(photo.name)
-                    moved_to_gallery += 1
                 except Exception as e:
                     self.logger.error(f"Error moving {photo}: {e}")
             
+            self.logger.info(f"Moved {moved_to_gallery} new photos to gallery")
+            
+            # STEP 4: Remove OLD photos from Gallery (ones not in selection)
+            removed_from_gallery = 0
+            deleted_dupes = []
+            
+            for photo in current_gallery_photos:
+                if self.operation_cancelled.is_set():
+                    return
+                if photo.name not in selected_names:
+                    new_path = library_path / photo.name
+                    try:
+                        if new_path.exists():
+                            # Duplicate exists in library, just delete from Gallery
+                            photo.unlink()
+                            deleted_dupes.append(photo.name)
+                        else:
+                            # Move back to library
+                            photo.rename(new_path)
+                            removed_from_gallery += 1
+                    except Exception as e:
+                        self.logger.error(f"Error removing {photo}: {e}")
+            
+            if deleted_dupes:
+                with self.viewed_photos_lock:
+                    for filename in deleted_dupes:
+                        self.viewed_photos.discard(filename)
+                self.logger.info(f"Removed {len(deleted_dupes)} duplicate(s)")
+            
+            if removed_from_gallery > 0:
+                self.logger.info(f"Moved {removed_from_gallery} old photos back to library")
+            
             self.save_viewed_photos()
-            self.logger.info(f"Switch complete: moved {moved_to_gallery} photos to gallery")
-            self.root.after(0, lambda: self.end_operation(f"Switched {moved_to_gallery} photos"))
+            self.logger.info(f"Switch complete: {len(selected_names)} photos now in gallery")
+            result_message = f"Switched to {len(selected_names)} photos"
             
         except Exception as e:
             self.logger.error(f"Error switching photos: {e}")
-            self.root.after(0, lambda: self.end_operation(f"Error: {str(e)}"))
+            result_message = f"Error: {str(e)}"
         finally:
+            self.root.after(0, lambda msg=result_message: self.end_operation(msg))
             self.operation_lock.release()
     
     def clear_gallery_async(self):
@@ -492,6 +665,7 @@ class PhotoScheduler:
             self.operation_lock.release()
     
     def _clear_gallery_worker(self):
+        result_message = "Operation cancelled"
         try:
             self.logger.info("Starting clear gallery...")
             
@@ -499,7 +673,7 @@ class PhotoScheduler:
             gallery_path = self.get_gallery_path()
             
             if not gallery_path.exists():
-                self.root.after(0, lambda: self.end_operation("Gallery directory does not exist"))
+                result_message = "Gallery directory does not exist"
                 return
             
             count = 0
@@ -527,11 +701,12 @@ class PhotoScheduler:
                 self.logger.info(f"Removed {len(deleted_dupes)} duplicate(s)")
             
             self.logger.info(f"Clear complete: moved {count} photos back")
-            self.root.after(0, lambda: self.end_operation(f"Moved {count} photos back"))
+            result_message = f"Moved {count} photos back"
         except Exception as e:
             self.logger.error(f"Error clearing gallery: {e}")
-            self.root.after(0, lambda: self.end_operation(f"Error: {str(e)}"))
+            result_message = f"Error: {str(e)}"
         finally:
+            self.root.after(0, lambda msg=result_message: self.end_operation(msg))
             self.operation_lock.release()
     
     def reset_history(self):
@@ -543,10 +718,10 @@ class PhotoScheduler:
             self.viewed_photos.clear()
         self.save_viewed_photos()
         
-        # Also clear date cache
-        self.date_cache.clear()
+        # Also clear metadata cache
+        self.metadata_cache.clear()
         self.cache_dirty = True
-        self.save_date_cache()
+        self.save_metadata_cache()
         
         self.logger.info("History and cache reset")
     
@@ -574,7 +749,7 @@ class PhotoScheduler:
         self.operation_cancelled.set()
         if self.current_thread and self.current_thread.is_alive():
             self.current_thread.join(timeout=2.0)
-        self.save_date_cache()  # Save cache on exit
+        self.save_metadata_cache()  # Save cache on exit
         self.root.destroy()
     
     def run(self):
