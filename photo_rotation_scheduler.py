@@ -270,7 +270,7 @@ class PhotoScheduler:
         top_frame.pack(fill="x", padx=10, pady=(15, 5))
         
         # Folder Settings frame
-        folder_settings = ttk.LabelFrame(top_frame, text="Folder Settings", padding=10)
+        folder_settings = ttk.LabelFrame(top_frame, text="Folders", padding=10)
         folder_settings.pack(side="left", fill="x", expand=False)
         
         self.create_path_row(folder_settings, "Library:", self.library_path, 0)
@@ -284,7 +284,7 @@ class PhotoScheduler:
             logo_label.place(relx=1.0, x=-15, y=10, anchor="ne")
         
         # Photo Settings frame
-        settings = ttk.LabelFrame(self.root, text="Photo Settings", padding=10)
+        settings = ttk.LabelFrame(self.root, text="Swap Settings", padding=10)
         settings.pack(fill="x", padx=10, pady=5)
         
         photo_frame = ttk.Frame(settings)
@@ -356,6 +356,11 @@ class PhotoScheduler:
         console_height = 400
         total_height = controls_height + console_height
         self.root.geometry(f"750x{total_height}+0+0")
+        
+        # Welcome text in the console
+        self.console_text.configure(state='normal')
+        self.console_text.insert(tk.END, "Frog:  I’m here to put a few of yer photos from yer Library folder in yer Gallery folder...")
+        self.console_text.configure(state='disabled')
         
     def create_path_row(self, parent, label, variable, row):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
