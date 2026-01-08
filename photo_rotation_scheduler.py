@@ -69,6 +69,9 @@ class PhotoScheduler:
         if not EXIF_AVAILABLE:
             self.logger.info("EXIF disabled (PIL not available - install: pip install Pillow)")
         
+        # Prune stale cache entries on startup
+        self.prune_metadata_cache()
+        
         self.update_next_switch()
         self.periodic_update()
     
@@ -123,6 +126,30 @@ class PhotoScheduler:
             self.cache_dirty = False
         except (IOError, OSError) as e:
             self.logger.error(f"Error saving metadata cache: {e}")
+    
+    def prune_metadata_cache(self):
+        """Remove cache entries for photos no longer in Library or Gallery.
+        
+        This prevents unbounded cache growth when photos are deleted from
+        the filesystem but their metadata remains in the cache.
+        """
+        library = self.get_library_path()
+        gallery = self.get_gallery_path()
+        
+        # Collect all valid photo filenames from both folders
+        valid_files = set()
+        for folder in [library, gallery]:
+            if folder.exists():
+                valid_files.update(p.name for p in self.iter_photos(folder))
+        
+        # Remove cache entries that no longer exist
+        before = len(self.metadata_cache)
+        self.metadata_cache = {k: v for k, v in self.metadata_cache.items() if k in valid_files}
+        removed = before - len(self.metadata_cache)
+        
+        if removed > 0:
+            self.cache_dirty = True
+            self.save_metadata_cache()
         
     def get_photo_date(self, photo_path):
         """Get photo date with caching"""
@@ -366,7 +393,7 @@ class PhotoScheduler:
         
         # Welcome text in the console
         self.console_text.configure(state='normal')
-        self.console_text.insert(tk.END, "Frog:  I'm here to put a few of yer photos from yer Library folder in yer Gallery folder...\n")
+        self.console_text.insert(tk.END, "Frog:  I'm here to put a few of yer photos from yer Library folder in yer Gallery folder...\n\n")
         self.console_text.configure(state='disabled')
         
     def create_path_row(self, parent, label, variable, row):
@@ -916,12 +943,10 @@ class PhotoScheduler:
             self.viewed_photos.clear()
         self.save_viewed_photos()
         
-        # Also clear metadata cache
-        self.metadata_cache.clear()
-        self.cache_dirty = True
-        self.save_metadata_cache()
+        # Prune stale cache entries (keeps valid metadata, removes deleted photos)
+        self.prune_metadata_cache()
         
-        self.logger.info("History and cache reset")
+        self.logger.info("View history reset")
     
     def start_operation(self):
         self.status.set("Working...")
