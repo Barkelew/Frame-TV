@@ -581,27 +581,37 @@ class PhotoScheduler:
         count = max(MIN_PHOTO_COUNT, min(count, MAX_PHOTO_COUNT))
         library_path = Path(library_path)
         
+        # Take a snapshot of viewed_photos to avoid race condition during iteration.
+        # This prevents issues where the set could be modified (e.g., by reset_history)
+        # while the generator is suspended at a yield point.
+        with self.viewed_photos_lock:
+            viewed_snapshot = self.viewed_photos.copy()
+        
         def unviewed_photos():
             for photo in self.iter_photos(library_path):
                 if self.operation_cancelled.is_set():
                     return
-                with self.viewed_photos_lock:
-                    if photo.name not in self.viewed_photos:
-                        if self._filter_by_orientation(photo, orientation_filter):
-                            yield photo
+                # No lock needed - checking against immutable snapshot
+                if photo.name not in viewed_snapshot:
+                    if self._filter_by_orientation(photo, orientation_filter):
+                        yield photo
         
         if mode == "Random":
             # Use reservoir sampling for memory efficiency
             return self._reservoir_sample(unviewed_photos(), count)
         else:
             # Newest/Oldest mode - need to scan with dates
-            return self._select_by_date(library_path, count, mode, orientation_filter)
+            return self._select_by_date(library_path, count, mode, orientation_filter, viewed_snapshot)
     
-    def _select_by_date(self, library_path, count, mode, orientation_filter):
+    def _select_by_date(self, library_path, count, mode, orientation_filter, viewed_snapshot):
         """Select photos sorted by date (newest or oldest).
         
         Returns whatever unviewed photos it can find (may be less than requested).
         Caller is responsible for handling consolidation if not enough photos.
+        
+        Args:
+            viewed_snapshot: A snapshot of viewed_photos to check against, avoiding
+                            race conditions during iteration.
         """
         self.logger.info(f"Selecting {count} {mode.lower()} photos (scanning library)...")
         processed = [0]  # Use list for closure modification
@@ -610,9 +620,9 @@ class PhotoScheduler:
             for photo in self.iter_photos(library_path):
                 if self.operation_cancelled.is_set():
                     return
-                with self.viewed_photos_lock:
-                    if photo.name in self.viewed_photos:
-                        continue
+                # No lock needed - checking against immutable snapshot
+                if photo.name in viewed_snapshot:
+                    continue
                 if not self._filter_by_orientation(photo, orientation_filter):
                     continue
                 processed[0] += 1
