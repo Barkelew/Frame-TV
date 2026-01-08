@@ -359,7 +359,7 @@ class PhotoScheduler:
         
         # Welcome text in the console
         self.console_text.configure(state='normal')
-        self.console_text.insert(tk.END, "Frog:  I’m here to put a few of yer photos from yer Library folder in yer Gallery folder...")
+        self.console_text.insert(tk.END, "Frog:  I’m here to put a few of yer photos from yer Library folder in yer Gallery folder...\n")
         self.console_text.configure(state='disabled')
         
     def create_path_row(self, parent, label, variable, row):
