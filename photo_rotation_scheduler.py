@@ -292,7 +292,7 @@ class PhotoScheduler:
         controls_left.grid(row=0, column=0, sticky="w")
         
         photo_frame = ttk.Frame(controls_left)
-        photo_frame.pack(anchor="w", pady=5)
+        photo_frame.pack(anchor="w", pady=10)
         ttk.Label(photo_frame, text="Photos:").pack(side="left")
         ttk.Entry(photo_frame, textvariable=self.photo_count, width=8).pack(side="left", padx=5)
         ttk.Label(photo_frame, text="Main Time:").pack(side="left", padx=(20,0))
@@ -573,7 +573,11 @@ class PhotoScheduler:
         return reservoir
     
     def select_photos(self, library_path, count, mode, orientation_filter="Both"):
-        """Select photos from library based on mode and filters"""
+        """Select photos from library based on mode and filters.
+        
+        Returns whatever unviewed photos it can find (may be less than requested).
+        Caller is responsible for handling consolidation if not enough photos.
+        """
         count = max(MIN_PHOTO_COUNT, min(count, MAX_PHOTO_COUNT))
         library_path = Path(library_path)
         
@@ -586,32 +590,19 @@ class PhotoScheduler:
                         if self._filter_by_orientation(photo, orientation_filter):
                             yield photo
         
-        def all_photos_filtered():
-            for photo in self.iter_photos(library_path):
-                if self.operation_cancelled.is_set():
-                    return
-                if self._filter_by_orientation(photo, orientation_filter):
-                    yield photo
-        
         if mode == "Random":
             # Use reservoir sampling for memory efficiency
-            selected = self._reservoir_sample(unviewed_photos(), count)
-            
-            if len(selected) < count:
-                self.logger.info("Resetting history - not enough unviewed photos")
-                with self.viewed_photos_lock:
-                    self.viewed_photos.clear()
-                self.save_viewed_photos()
-                selected = self._reservoir_sample(all_photos_filtered(), count)
-            
-            return selected
-        
+            return self._reservoir_sample(unviewed_photos(), count)
         else:
             # Newest/Oldest mode - need to scan with dates
             return self._select_by_date(library_path, count, mode, orientation_filter)
     
     def _select_by_date(self, library_path, count, mode, orientation_filter):
-        """Select photos sorted by date (newest or oldest)"""
+        """Select photos sorted by date (newest or oldest).
+        
+        Returns whatever unviewed photos it can find (may be less than requested).
+        Caller is responsible for handling consolidation if not enough photos.
+        """
         self.logger.info(f"Selecting {count} {mode.lower()} photos (scanning library)...")
         processed = [0]  # Use list for closure modification
         
@@ -635,29 +626,6 @@ class PhotoScheduler:
         
         self.logger.info(f"Scan complete: processed {processed[0]} photos")
         self.save_metadata_cache()
-        
-        if len(selected) < count:
-            self.logger.info("Resetting history - not enough unviewed photos")
-            with self.viewed_photos_lock:
-                self.viewed_photos.clear()
-            self.save_viewed_photos()
-            
-            processed[0] = 0
-            
-            def all_photos_with_date():
-                for photo in self.iter_photos(library_path):
-                    if self.operation_cancelled.is_set():
-                        return
-                    if not self._filter_by_orientation(photo, orientation_filter):
-                        continue
-                    processed[0] += 1
-                    if processed[0] % CACHE_SAVE_INTERVAL == 0:
-                        self.logger.info(f"Scanned {processed[0]} photos...")
-                    yield (self.get_photo_date(photo), photo)
-            
-            selected = [photo for _, photo in heap_func(count, all_photos_with_date())]
-            self.logger.info(f"Scan complete: processed {processed[0]} photos")
-            self.save_metadata_cache()
         
         return selected
     
@@ -704,27 +672,57 @@ class PhotoScheduler:
             
             gallery_path.mkdir(parents=True, exist_ok=True)
             
-            # STEP 1: Select new photos
+            # STEP 1: Select new photos from Library (unviewed only)
             count = int(self.photo_count.get())
             mode = self.selection_mode.get()
             orientation = self.orientation_filter.get()
             self.logger.info("Selecting new photos...")
             selected = self.select_photos(library_path, count, mode, orientation)
+            
+            if self.operation_cancelled.is_set():
+                return
+            
+            # STEP 2: If not enough unviewed photos, consolidate and retry
+            if len(selected) < count:
+                self.logger.info("All photos viewed, starting fresh cycle")
+                
+                # Move all Gallery photos back to Library
+                consolidated = self._consolidate_gallery_to_library(gallery_path, library_path)
+                self.logger.info(f"Consolidated {consolidated} photos from Gallery to Library")
+                
+                # Reset view history
+                with self.viewed_photos_lock:
+                    self.viewed_photos.clear()
+                self.save_viewed_photos()
+                
+                if self.operation_cancelled.is_set():
+                    return
+                
+                # Re-select from the combined pool
+                selected = self.select_photos(library_path, count, mode, orientation)
+                
+                if self.operation_cancelled.is_set():
+                    return
+                
+                # Warn if still not enough
+                if len(selected) < count:
+                    self.logger.warning(f"Only {len(selected)} photos available (requested {count})")
+            
             selected_names = {photo.name for photo in selected}
             
             if self.operation_cancelled.is_set():
                 return
             
-            # STEP 2: Get current Gallery contents
+            # STEP 3: Get current Gallery contents (may be empty after consolidation)
             current_gallery_photos = list(self.iter_photos(gallery_path))
             
-            # STEP 3: Move new photos to gallery
+            # STEP 4: Move new photos to gallery
             moved_to_gallery = self._move_photos_to_gallery(selected, gallery_path)
             
             if self.operation_cancelled.is_set():
                 return
             
-            # STEP 4: Remove old photos from gallery
+            # STEP 5: Remove old photos from gallery (if any remain)
             removed_count, deleted_dupes = self._remove_old_photos_from_gallery(
                 current_gallery_photos, selected_names, library_path
             )
@@ -751,6 +749,30 @@ class PhotoScheduler:
         finally:
             self.root.after(0, lambda msg=result_message: self.end_operation(msg))
             self.operation_lock.release()
+    
+    def _consolidate_gallery_to_library(self, gallery_path, library_path):
+        """Move all photos from Gallery back to Library for fresh selection.
+        
+        Returns the number of photos moved.
+        """
+        moved_count = 0
+        for photo in self.iter_photos(gallery_path):
+            if self.operation_cancelled.is_set():
+                break
+            new_path = library_path / photo.name
+            try:
+                try:
+                    photo.rename(new_path)
+                    moved_count += 1
+                except FileExistsError:
+                    # Duplicate exists in library, just delete from Gallery
+                    photo.unlink()
+                    self.logger.debug(f"Deleted gallery duplicate during consolidation: {photo.name}")
+            except PermissionError as e:
+                self.logger.error(f"Permission denied moving {photo}: {e}")
+            except (IOError, OSError) as e:
+                self.logger.error(f"Error moving {photo}: {e}")
+        return moved_count
     
     def _move_photos_to_gallery(self, selected_photos, gallery_path):
         """Move selected photos to gallery, handling duplicates"""
