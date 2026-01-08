@@ -287,30 +287,37 @@ class PhotoScheduler:
         settings = ttk.LabelFrame(self.root, text="Swap Settings", padding=10)
         settings.pack(fill="x", padx=10, pady=5)
         
-        photo_frame = ttk.Frame(settings)
-        photo_frame.grid(row=0, column=0, columnspan=2, pady=5)
+        # Left side container for controls
+        controls_left = ttk.Frame(settings)
+        controls_left.grid(row=0, column=0, sticky="w")
+        
+        photo_frame = ttk.Frame(controls_left)
+        photo_frame.pack(anchor="w", pady=5)
         ttk.Label(photo_frame, text="Photos:").pack(side="left")
         ttk.Entry(photo_frame, textvariable=self.photo_count, width=8).pack(side="left", padx=5)
-        ttk.Label(photo_frame, text="Order:").pack(side="left", padx=(20,0))
-        mode_combo = ttk.Combobox(photo_frame, textvariable=self.selection_mode, width=10, state="readonly")
+        ttk.Label(photo_frame, text="Main Time:").pack(side="left", padx=(20,0))
+        ttk.Entry(photo_frame, textvariable=self.main_time, width=8).pack(side="left", padx=5)
+        ttk.Label(photo_frame, text="Switches/Day:").pack(side="left", padx=(20,0))
+        ttk.Entry(photo_frame, textvariable=self.switches_per_day, width=8).pack(side="left", padx=5)
+        
+        schedule_frame = ttk.Frame(controls_left)
+        schedule_frame.pack(anchor="w", pady=5)
+        ttk.Label(schedule_frame, text="Order:").pack(side="left")
+        mode_combo = ttk.Combobox(schedule_frame, textvariable=self.selection_mode, width=10, state="readonly")
         mode_combo['values'] = ("Random", "Newest", "Oldest")
         mode_combo.pack(side="left", padx=5)
-        ttk.Label(photo_frame, text="Orientation:").pack(side="left", padx=(10,0))
-        orientation_combo = ttk.Combobox(photo_frame, textvariable=self.orientation_filter, width=10, state="readonly")
+        ttk.Label(schedule_frame, text="Orientation:").pack(side="left", padx=(10,0))
+        orientation_combo = ttk.Combobox(schedule_frame, textvariable=self.orientation_filter, width=10, state="readonly")
         orientation_combo['values'] = ("Both", "Portrait", "Landscape")
         orientation_combo.pack(side="left", padx=5)
         
-        schedule_frame = ttk.Frame(settings)
-        schedule_frame.grid(row=1, column=0, columnspan=2, pady=5)
-        ttk.Label(schedule_frame, text="Main Time:").pack(side="left")
-        ttk.Entry(schedule_frame, textvariable=self.main_time, width=8).pack(side="left", padx=5)
-        ttk.Label(schedule_frame, text="Switches/Day:").pack(side="left", padx=(20,0))
-        ttk.Entry(schedule_frame, textvariable=self.switches_per_day, width=8).pack(side="left", padx=5)
+        # Configure grid to expand middle column
+        settings.columnconfigure(1, weight=1)
         
-        # buttons
-        update_btn = ttk.Button(schedule_frame, text="Update Settings", 
+        # Button on the right
+        update_btn = ttk.Button(settings, text="Update Settings", 
                                command=self.update_settings, style="Large.TButton")
-        update_btn.pack(side="left", padx=(20,0))
+        update_btn.grid(row=0, column=2, sticky="e", padx=(20,0))
         
         status_frame = ttk.LabelFrame(self.root, text="Status", padding=10)
         status_frame.pack(fill="x", padx=10, pady=5)
@@ -359,7 +366,7 @@ class PhotoScheduler:
         
         # Welcome text in the console
         self.console_text.configure(state='normal')
-        self.console_text.insert(tk.END, "Frog:  I’m here to put a few of yer photos from yer Library folder in yer Gallery folder...\n")
+        self.console_text.insert(tk.END, "Frog:  Iâ€™m here to put a few of yer photos from yer Library folder in yer Gallery folder...\n")
         self.console_text.configure(state='disabled')
         
     def create_path_row(self, parent, label, variable, row):
